@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Framing App - Development</title>
+    <style>
+        #root {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .loading {
+            margin: 20px;
+            padding: 20px;
+            border: 1px solid #ccc;
+            background: #f9f9f9;
+        }
+    </style>
+</head>
+<body>
+    <div id="root">
+        <div class="loading">Loading application...</div>
+    </div>
+    <!-- Move script to end of body and add defer -->
+    <script type="module" src="/src/index.jsx" defer></script>
+</body>
+</html>

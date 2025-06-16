@@ -18,43 +18,133 @@
 		require_once plugin_dir_path(__FILE__) . 'admin/options-admin.php';
 	}
 
-	// Load image processing handlers
-	require_once plugin_dir_path(__FILE__) . 'includes/image-handler.php';
+	// Load required files
+require_once plugin_dir_path(__FILE__) . 'includes/class-cfd-file-manager.php';
+require_once plugin_dir_path(__FILE__) . 'includes/image-handler.php';
 
 function cfd_enqueue_scripts() {
-    // Load fabric.js
-    wp_enqueue_script('fabric-js', 'https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js', array('jquery'), null, true);
+    // Only load scripts on pages that need them
+    if (!is_admin()) {
+        // Load fabric.js
+        wp_enqueue_script('fabric-js', 'https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js', array('jquery'), '5.3.1', true);
 
-    // Load and localize main.js
-    wp_enqueue_script('cfd-main-js', plugin_dir_url(__FILE__) . 'assets/js/main.js', array('jquery', 'fabric-js'), null, true);
-    wp_localize_script('cfd-main-js', 'cfdData', array(
-        'ajaxurl' => admin_url('admin-ajax.php'),
-        'nonce'   => wp_create_nonce('custom_frame_nonce')
-    ));
+        // Enqueue the Vite-built React app
+        $react_script_handle = 'cfd-react-app';
+        wp_enqueue_script(
+            $react_script_handle,
+            plugin_dir_url(__FILE__) . 'dist/bundle.js',
+            array('wp-element', 'wp-i18n', 'jquery', 'fabric-js'),
+            filemtime(plugin_dir_path(__FILE__) . 'dist/bundle.js'),
+            true // Load in footer
+        );
+        
+        // Localize script with WordPress data
+        wp_localize_script($react_script_handle, 'wpVars', array(
+            'ajaxurl' => admin_url('admin-ajax.php'),
+            'nonce'   => wp_create_nonce('wp_rest'),
+            'rest_url' => esc_url_raw(rest_url()),
+            'home_url' => esc_url_raw(home_url('/')),
+            'plugin_url' => plugin_dir_url(__FILE__),
+            'ajax_nonce' => wp_create_nonce('cfd_ajax_nonce')
+        ));
 
-    // Load styles
-    wp_enqueue_style('cfd-styles', plugin_dir_url(__FILE__) . 'assets/css/style.css');
+        // Load styles
+        wp_enqueue_style('cfd-styles', plugin_dir_url(__FILE__) . 'assets/css/style.css');
+    }
 }
 add_action('wp_enqueue_scripts', 'cfd_enqueue_scripts');
 
-// image processing - creates a smaller optimized ver of uploaded image to use in Mockup
-// and saves the orig for use as a print file.
-function cfd_enqueue_image_processing_scripts() {
-    wp_enqueue_script(
-        'cfd-image-processing-js',
-        plugin_dir_url(__FILE__) . 'assets/js/image-processing.js',
-        array('jquery'), // Dependencies
-        '1.0.0', // Version
-        true // Load in footer
-    );
+// Handle image uploads via AJAX
+function cfd_handle_image_upload() {
+    // Verify nonce
+    if (!isset($_POST['_ajax_nonce']) || !wp_verify_nonce($_POST['_ajax_nonce'], 'cfd_ajax_nonce')) {
+        wp_send_json_error('Invalid nonce');
+        return;
+    }
+
+    if (!function_exists('wp_handle_upload') || !function_exists('wp_get_image_editor')) {
+        require_once(ABSPATH . 'wp-admin/includes/file.php');
+        require_once(ABSPATH . 'wp-admin/includes/image.php');
+    }
+
+    // Get order ID or use 'temp' for unassigned uploads
+    $order_id = !empty($_POST['order_id']) ? sanitize_text_field($_POST['order_id']) : 'temp';
     
-    // Pass WordPress AJAX URL to JavaScript
-    wp_localize_script('cfd-image-processing-js', 'cfdData', array(
-        'ajaxurl' => admin_url('admin-ajax.php'),
-		'nonce' => wp_create_nonce('custom_frame_nonce')
+    // Get upload directories
+    $upload_dirs = CFD_File_Manager::get_order_upload_dir($order_id);
+    
+    // Set upload overrides
+    $upload_overrides = array(
+        'test_form' => false,
+        'unique_filename_callback' => function($dir, $name, $ext) use ($upload_dirs) {
+            return wp_unique_filename($upload_dirs['original']['dir'], $name . $ext);
+        }
+    );
+
+    // Handle the original file upload
+    $uploadedfile = $_FILES['file'];
+    $original_file = wp_handle_upload($uploadedfile, $upload_overrides);
+
+    if (isset($original_file['error'])) {
+        wp_send_json_error('Upload error: ' . $original_file['error']);
+        return;
+    }
+
+    // Generate preview filename
+    $preview_filename = basename($original_file['file']);
+    $preview_file = $upload_dirs['preview']['dir'] . '/' . $preview_filename;
+    $preview_url = $upload_dirs['preview']['url'] . '/' . $preview_filename;
+    
+    // Create optimized version for preview (max 1200px, 80% quality)
+    $image = wp_get_image_editor($original_file['file']);
+    if (!is_wp_error($image)) {
+        $image->resize(1200, 1200, false); // Resize while maintaining aspect ratio
+        $image->set_quality(80);
+        $saved = $image->save($preview_file);
+        
+        if (is_wp_error($saved)) {
+            error_log('Preview creation failed: ' . $saved->get_error_message());
+            // Fallback to original if preview creation fails
+            copy($original_file['file'], $preview_file);
+        }
+    } else {
+        error_log('Image editor error: ' . $image->get_error_message());
+        copy($original_file['file'], $preview_file);
+    }
+
+    // Create attachment for the original file
+    $attachment = array(
+        'post_mime_type' => $original_file['type'],
+        'post_title'     => preg_replace('/\.[^.]+$/', '', basename($original_file['file'])),
+        'post_content'   => '',
+        'post_status'    => 'inherit',
+        'meta_input'     => array(
+            '_cfd_original_path' => $original_file['file'],
+            '_cfd_preview_path' => $preview_file,
+            '_cfd_order_id'     => $order_id
+        )
+    );
+
+    $attach_id = wp_insert_attachment($attachment, $original_file['file']);
+    $attach_data = wp_generate_attachment_metadata($attach_id, $original_file['file']);
+    wp_update_attachment_metadata($attach_id, $attach_data);
+
+    // Return both file URLs
+    wp_send_json_success(array(
+        'original' => array(
+            'url' => $original_file['url'],
+            'path' => $original_file['file']
+        ),
+        'preview' => array(
+            'url' => $preview_url,
+            'path' => $preview_file
+        ),
+        'attachment_id' => $attach_id,
+        'order_id' => $order_id
     ));
 }
-add_action('wp_enqueue_scripts', 'cfd_enqueue_image_processing_scripts');
+add_action('wp_ajax_handle_image_upload', 'cfd_handle_image_upload');
+add_action('wp_ajax_nopriv_handle_image_upload', 'cfd_handle_image_upload');
 
 //  Register shortcode - framing_stage
 function cfd_framing_stage_shortcode() {
@@ -66,7 +156,7 @@ function cfd_framing_stage_shortcode() {
         <!-- Left column: Mockup area -->
         <div class="mockup-container">
             <!-- Framing container (Konva stage will render here) -->
-            <div id="framingContainer"></div>
+            <div id="root"></div>
         </div>
         
         <!-- Right column: Controls   -->
