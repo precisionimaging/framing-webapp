@@ -5,10 +5,37 @@ import path from 'path';
 export default defineConfig({
   root: __dirname,
   publicDir: 'public',
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, 'src'),
+      '@components': path.resolve(__dirname, 'src/components')
+    },
+    extensions: ['.js', '.jsx', '.json']
+  },
   plugins: [
     react({
       jsxRuntime: 'automatic',
-      include: '**/*.{jsx,tsx}',
+      include: ['**/*.jsx', '**/*.js'],
+      babel: {
+        presets: [
+          '@babel/preset-react',
+          ['@babel/preset-env', {
+            targets: {
+              esmodules: true,
+            },
+            bugfixes: true,
+            useBuiltIns: 'usage',
+            corejs: 3,
+          }]
+        ],
+        plugins: [
+          ['@babel/plugin-proposal-class-properties', { loose: true }],
+          ['@babel/plugin-proposal-private-methods', { loose: true }],
+          ['@babel/plugin-proposal-private-property-in-object', { loose: true }],
+          '@babel/plugin-transform-class-properties',
+          '@babel/plugin-transform-runtime'
+        ]
+      }
     })
   ],
   build: {
@@ -20,10 +47,13 @@ export default defineConfig({
         main: path.resolve(__dirname, 'index.html')
       },
       output: {
-        entryFileNames: 'bundle.js',
-        assetFileNames: 'assets/[name][extname]',
-        chunkFileNames: 'assets/[name].[hash].js'
+        entryFileNames: 'assets/[name].[hash].js',
+        chunkFileNames: 'assets/[name].[hash].js',
+        assetFileNames: 'assets/[name].[hash][extname]',
       }
+    },
+    commonjsOptions: {
+      esmExternals: true
     }
   },
   server: {
